@@ -1,0 +1,34 @@
+EMSCRIPTEN ?= C:/emsdk/upstream/emscripten
+
+F77 = $(EMSCRIPTEN)/emcc
+AR = $(EMSCRIPTEN)/emar
+
+SRC = gravity_wave_model.f
+WRAPPER = wrapper.c
+OBJ = gravity_wave_model.o
+LIB = libgravity_wave.a
+OUT = ../frontend/public/wasm/gravityWaveModel.js
+
+FFLAGS = -O2 -fdefault-real-8 -fdefault-double-8
+EMFLAGS = -O2 -s WASM=1
+EMFLAGS += -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue"]'
+EMFLAGS += -s EXPORTED_FUNCTIONS='["_wasm_init","_wasm_free","_wasm_compute","_wasm_get_u8_ptr","_wasm_serialize_fields","_wasm_get_grid_size","_wasm_get_field_bytes","_wasm_get_total_bytes","_wasm_get_nlon","_wasm_get_nlat","_wasm_get_nlev","_wasm_validate","_malloc","_free"]'
+EMFLAGS += -s ALLOW_MEMORY_GROWTH=1
+EMFLAGS += -s MODULARIZE=1 -s EXPORT_ES6=1
+EMFLAGS += -s INITIAL_MEMORY=64MB
+
+.PHONY: all clean
+
+all: $(OUT)
+
+$(OBJ): $(SRC)
+	$(F77) $(FFLAGS) -c $< -o $@
+
+$(LIB): $(OBJ)
+	$(AR) rcs $@ $^
+
+$(OUT): $(WRAPPER) $(LIB)
+	$(F77) $(EMFLAGS) $(WRAPPER) -L. -lgravity_wave -lfortran -o $@
+
+clean:
+	del /Q $(OBJ) $(LIB) $(OUT) gravityWaveModel.wasm 2>nul || true
