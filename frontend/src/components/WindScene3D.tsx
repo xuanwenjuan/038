@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { WindFields } from '../types';
+import { WindFields, Annotation, RoomMember } from '../types';
 import { computeStreamlines, createStreamlineTubes, createGridBox } from '../vis/streamlines';
 import { ParticleTracer } from '../vis/ParticleTracer';
 import { AnimationRecorder, RecordingState } from '../recording/AnimationRecorder';
@@ -15,14 +15,33 @@ interface Props {
   splitMode: boolean;
   showParticles: boolean;
   showStreamlines: boolean;
+
+  annotations: Annotation[];
+  onSceneClickForAnnotation: (pos: { x: number; y: number; z: number }) => void;
+  annotationMode: boolean;
+  onSetAnnotationMode: (active: boolean) => void;
+
+  profileMode: boolean;
+  onProfilePointsSelected: (p1: { x: number; y: number; z: number }, p2: { x: number; y: number; z: number }) => void;
+  onSetProfileMode: (active: boolean) => void;
+
+  remoteCursors: Record<string, { position: { x: number; y: number; z: number }; color: string }>;
+  onCursorMove: (pos: { x: number; y: number; z: number }) => void;
+
+  onGotoAnnotation?: (ann: Annotation) => void;
 }
 
 export interface WindScene3DHandle {
   getCanvas: () => HTMLCanvasElement | null;
+  getCamera: () => THREE.PerspectiveCamera | null;
+  setViewpoint: (pos: { x: number; y: number; z: number }) => void;
 }
 
 export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
   fields, referenceFields, loading, rmseStats, splitMode, showParticles, showStreamlines,
+  annotations, onSceneClickForAnnotation, annotationMode, onSetAnnotationMode,
+  profileMode, onProfilePointsSelected, onSetProfileMode,
+  remoteCursors, onCursorMove,
 }, ref) => {
   const leftContainerRef = useRef<HTMLDivElement>(null);
   const rightContainerRef = useRef<HTMLDivElement>(null);
@@ -35,6 +54,11 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
   const leftGridRef = useRef<THREE.Group | null>(null);
   const leftParticleRef = useRef<ParticleTracer | null>(null);
   const leftParticleMeshRef = useRef<THREE.Points | null>(null);
+  const leftAnnotationsRef = useRef<THREE.Group | null>(null);
+  const leftCursorsRef = useRef<THREE.Group | null>(null);
+  const leftRaycaster = useRef<THREE.Raycaster>(new THREE.Raycaster());
+  const leftMouse = useRef<THREE.Vector2>(new THREE.Vector2());
+  const leftPickPlane = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0));
 
   const rightSceneRef = useRef<THREE.Scene | null>(null);
   const rightRendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -44,6 +68,12 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
   const rightGridRef = useRef<THREE.Group | null>(null);
   const rightParticleRef = useRef<ParticleTracer | null>(null);
   const rightParticleMeshRef = useRef<THREE.Points | null>(null);
+
+  const profileP1Ref = useRef<THREE.Mesh | null>(null);
+  const profileP2Ref = useRef<THREE.Mesh | null>(null);
+  const profileLineRef = useRef<THREE.Line | null>(null);
+  const [profileStep, setProfileStep] = useState<0 | 1>(0);
+  const profileP1Data = useRef<{ x: number; y: number; z: number } | null>(null);
 
   const animRef = useRef<number>(0);
   const recorderRef = useRef<AnimationRecorder | null>(null);
@@ -57,6 +87,19 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
 
   useImperativeHandle(ref, () => ({
     getCanvas: () => leftRendererRef.current?.domElement || null,
+    getCamera: () => leftCameraRef.current,
+    setViewpoint: (pos) => {
+      if (leftCameraRef.current && leftControlsRef.current) {
+        const cam = leftCameraRef.current;
+        cam.position.set(
+          pos.x + 300,
+          pos.y + 200,
+          pos.z + 400
+        );
+        leftControlsRef.current.target.set(pos.x, pos.y, pos.z);
+        leftControlsRef.current.update();
+      }
+    },
   }));
 
   const setupScene = useCallback((
@@ -65,6 +108,7 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
     rendererRef: React.MutableRefObject<THREE.WebGLRenderer | null>,
     cameraRef: React.MutableRefObject<THREE.PerspectiveCamera | null>,
     controlsRef: React.MutableRefObject<OrbitControls | null>,
+    createCursors: boolean,
   ) => {
     const width = container.clientWidth;
     const height = container.clientHeight;
@@ -86,6 +130,7 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
+    controls.target.set(180, 0, 500);
     controlsRef.current = controls;
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.6);
@@ -97,15 +142,180 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
     pointLight.position.set(-200, 200, -200);
     scene.add(pointLight);
 
+    if (createCursors) {
+      const cursorsGroup = new THREE.Group();
+      cursorsGroup.name = 'remoteCursors';
+      scene.add(cursorsGroup);
+      if (container === leftContainerRef.current) {
+        leftCursorsRef.current = cursorsGroup;
+      }
+    }
+
     return { scene, camera, renderer, controls };
   }, []);
+
+  const createAnnotationSprite = useCallback((ann: Annotation): THREE.Sprite => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d')!;
+
+    ctx.fillStyle = ann.authorColor || '#5ab0ff';
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.roundRect(0, 20, 256, 90, 10);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(10, 14, 26, 0.9)';
+    ctx.beginPath();
+    ctx.roundRect(8, 28, 240, 82, 8);
+    ctx.fill();
+
+    ctx.globalAlpha = 1.0;
+    ctx.fillStyle = ann.authorColor || '#5ab0ff';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText(ann.author, 20, 58);
+
+    ctx.fillStyle = '#e0e8f0';
+    ctx.font = '16px sans-serif';
+    const text = ann.text.length > 12 ? ann.text.substring(0, 11) + '…' : ann.text;
+    ctx.fillText(text, 20, 86);
+
+    ctx.fillStyle = '#7890a8';
+    ctx.font = '12px sans-serif';
+    const time = new Date(ann.timestamp * 1000).toLocaleString('zh-CN', {
+      month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+    ctx.fillText(time, 20, 106);
+
+    ctx.fillStyle = ann.authorColor || '#5ab0ff';
+    ctx.beginPath();
+    ctx.moveTo(128, 10);
+    ctx.lineTo(118, 22);
+    ctx.lineTo(138, 22);
+    ctx.closePath();
+    ctx.fill();
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.position.set(ann.position.x, ann.position.y, ann.position.z);
+    sprite.scale.set(80, 40, 1);
+    sprite.userData.annotationId = ann.id;
+
+    return sprite;
+  }, []);
+
+  const updateAnnotations = useCallback(() => {
+    if (!leftSceneRef.current) return;
+
+    if (leftAnnotationsRef.current) {
+      leftSceneRef.current.remove(leftAnnotationsRef.current);
+      leftAnnotationsRef.current.traverse(obj => {
+        if (obj instanceof THREE.Sprite) {
+          obj.material?.dispose();
+          (obj.material as any)?.map?.dispose();
+        }
+      });
+    }
+
+    const group = new THREE.Group();
+    group.name = 'annotations';
+    for (const ann of annotations) {
+      const sprite = createAnnotationSprite(ann);
+      group.add(sprite);
+    }
+    leftSceneRef.current.add(group);
+    leftAnnotationsRef.current = group;
+  }, [annotations, createAnnotationSprite]);
+
+  useEffect(() => {
+    updateAnnotations();
+  }, [updateAnnotations]);
+
+  const updateRemoteCursors = useCallback(() => {
+    if (!leftSceneRef.current) return;
+    if (!leftCursorsRef.current) return;
+
+    while (leftCursorsRef.current.children.length > 0) {
+      const c = leftCursorsRef.current.children[0];
+      leftCursorsRef.current.remove(c);
+      if (c instanceof THREE.Mesh) {
+        c.geometry?.dispose();
+        (c.material as any)?.dispose();
+      }
+    }
+
+    for (const [sid, cursorData] of Object.entries(remoteCursors)) {
+      const geom = new THREE.RingGeometry(8, 12, 16);
+      const mat = new THREE.MeshBasicMaterial({
+        color: cursorData.color || '#ff6b6b',
+        transparent: true,
+        opacity: 0.8,
+        side: THREE.DoubleSide,
+        depthTest: false,
+      });
+      const ring = new THREE.Mesh(geom, mat);
+      ring.position.set(cursorData.position.x, cursorData.position.y, cursorData.position.z);
+      ring.lookAt(leftCameraRef.current?.position || new THREE.Vector3(500, 350, 800));
+      ring.userData.sid = sid;
+      leftCursorsRef.current.add(ring);
+    }
+  }, [remoteCursors]);
+
+  useEffect(() => {
+    updateRemoteCursors();
+  }, [updateRemoteCursors]);
+
+  const updateProfileMarkers = useCallback(() => {
+    const scene = leftSceneRef.current;
+    if (!scene) return;
+
+    const clearMarkers = () => {
+      if (profileP1Ref.current) {
+        scene.remove(profileP1Ref.current);
+        profileP1Ref.current.geometry.dispose();
+        (profileP1Ref.current.material as THREE.Material).dispose();
+        profileP1Ref.current = null;
+      }
+      if (profileP2Ref.current) {
+        scene.remove(profileP2Ref.current);
+        profileP2Ref.current.geometry.dispose();
+        (profileP2Ref.current.material as THREE.Material).dispose();
+        profileP2Ref.current = null;
+      }
+      if (profileLineRef.current) {
+        scene.remove(profileLineRef.current);
+        profileLineRef.current.geometry.dispose();
+        (profileLineRef.current.material as THREE.Material).dispose();
+        profileLineRef.current = null;
+      }
+    };
+
+    if (!profileMode) {
+      clearMarkers();
+      setProfileStep(0);
+      profileP1Data.current = null;
+      return;
+    }
+  }, [profileMode]);
+
+  useEffect(() => {
+    updateProfileMarkers();
+  }, [updateProfileMarkers]);
 
   useEffect(() => {
     if (!leftContainerRef.current) return;
 
     const left = setupScene(
       leftContainerRef.current,
-      leftSceneRef, leftRendererRef, leftCameraRef, leftControlsRef
+      leftSceneRef, leftRendererRef, leftCameraRef, leftControlsRef,
+      true
     );
     if (!left) return;
 
@@ -113,7 +323,8 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
     if (splitMode && rightContainerRef.current) {
       rightSetup = setupScene(
         rightContainerRef.current,
-        rightSceneRef, rightRendererRef, rightCameraRef, rightControlsRef
+        rightSceneRef, rightRendererRef, rightCameraRef, rightControlsRef,
+        false
       );
     }
 
@@ -122,13 +333,130 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
       onStop: (blob: Blob) => {
         setRecordingState('stopped');
         AnimationRecorder.download(blob);
-        setRecordingState('idle');
+        setTimeout(() => setRecordingState('idle'), 500);
       },
       onError: () => setRecordingState('idle'),
     });
     recorderRef.current = recorder;
 
     let lastTime = performance.now();
+
+    const handleCanvasClick = (e: MouseEvent, scene: THREE.Scene, camera: THREE.PerspectiveCamera, isLeft: boolean) => {
+      if (!isLeft) return;
+      if (!annotationMode && !profileMode) return;
+
+      const container = leftContainerRef.current!;
+      const rect = container.getBoundingClientRect();
+      leftMouse.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      leftMouse.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      leftRaycaster.current.setFromCamera(leftMouse.current, camera);
+
+      const dir = leftRaycaster.current.ray.direction.clone();
+      const planeNormal = camera.getWorldDirection(new THREE.Vector3()).negate();
+      const plane = new THREE.Plane();
+      plane.setFromNormalAndCoplanarPoint(
+        planeNormal.normalize(),
+        new THREE.Vector3(180, 0, 500)
+      );
+
+      const intersectPt = new THREE.Vector3();
+      leftRaycaster.current.ray.intersectPlane(plane, intersectPt);
+
+      if (!intersectPt || isNaN(intersectPt.x)) return;
+
+      const worldPos = {
+        x: Math.max(0, Math.min(360, intersectPt.x)),
+        y: Math.max(-90, Math.min(90, intersectPt.y)),
+        z: Math.max(0, Math.min(1000, intersectPt.z)),
+      };
+
+      if (annotationMode) {
+        onSceneClickForAnnotation(worldPos);
+        onSetAnnotationMode(false);
+      }
+
+      if (profileMode) {
+        if (profileStep === 0) {
+          if (!leftSceneRef.current) return;
+          if (profileP1Ref.current) {
+            leftSceneRef.current.remove(profileP1Ref.current);
+            profileP1Ref.current.geometry.dispose();
+            (profileP1Ref.current.material as THREE.Material).dispose();
+          }
+          const g = new THREE.SphereGeometry(6, 16, 16);
+          const m = new THREE.MeshBasicMaterial({ color: '#4ecdc4', depthTest: false });
+          const mesh = new THREE.Mesh(g, m);
+          mesh.position.set(worldPos.x, worldPos.y, worldPos.z);
+          leftSceneRef.current.add(mesh);
+          profileP1Ref.current = mesh;
+          profileP1Data.current = worldPos;
+          setProfileStep(1);
+        } else {
+          if (!leftSceneRef.current) return;
+          const g = new THREE.SphereGeometry(6, 16, 16);
+          const m = new THREE.MeshBasicMaterial({ color: '#ff6b6b', depthTest: false });
+          const mesh = new THREE.Mesh(g, m);
+          mesh.position.set(worldPos.x, worldPos.y, worldPos.z);
+          leftSceneRef.current.add(mesh);
+          profileP2Ref.current = mesh;
+
+          if (profileP1Data.current) {
+            const p1 = profileP1Data.current;
+            const lineGeom = new THREE.BufferGeometry().setFromPoints([
+              new THREE.Vector3(p1.x, p1.y, p1.z),
+              new THREE.Vector3(worldPos.x, worldPos.y, worldPos.z),
+            ]);
+            const lineMat = new THREE.LineDashedMaterial({
+              color: '#ffe66d',
+              dashSize: 8,
+              gapSize: 4,
+              linewidth: 2,
+              depthTest: false,
+            });
+            const line = new THREE.Line(lineGeom, lineMat);
+            line.computeLineDistances();
+            leftSceneRef.current.add(line);
+            profileLineRef.current = line;
+
+            onProfilePointsSelected(p1, worldPos);
+          }
+          setProfileStep(0);
+          profileP1Data.current = null;
+          onSetProfileMode(false);
+        }
+      }
+    };
+
+    const leftCanvas = left.renderer.domElement;
+    const leftClickHandler = (e: MouseEvent) => handleCanvasClick(e, left.scene, left.camera, true);
+    leftCanvas.addEventListener('click', leftClickHandler);
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!leftContainerRef.current || !leftCameraRef.current) return;
+      const container = leftContainerRef.current!;
+      const rect = container.getBoundingClientRect();
+      leftMouse.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      leftMouse.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      leftRaycaster.current.setFromCamera(leftMouse.current, leftCameraRef.current);
+      const dir = leftRaycaster.current.ray.direction.clone();
+      const planeNormal = leftCameraRef.current.getWorldDirection(new THREE.Vector3()).negate();
+      const plane = new THREE.Plane();
+      plane.setFromNormalAndCoplanarPoint(
+        planeNormal.normalize(),
+        new THREE.Vector3(180, 0, 500)
+      );
+      const intersectPt = new THREE.Vector3();
+      leftRaycaster.current.ray.intersectPlane(plane, intersectPt);
+      if (intersectPt && !isNaN(intersectPt.x)) {
+        onCursorMove({
+          x: intersectPt.x,
+          y: intersectPt.y,
+          z: intersectPt.z,
+        });
+      }
+    };
+    leftCanvas.addEventListener('mousemove', handleMouseMove);
 
     const animate = () => {
       animRef.current = requestAnimationFrame(animate);
@@ -175,6 +503,8 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
     return () => {
       cancelAnimationFrame(animRef.current);
       window.removeEventListener('resize', handleResize);
+      leftCanvas.removeEventListener('click', leftClickHandler);
+      leftCanvas.removeEventListener('mousemove', handleMouseMove);
       left.renderer.dispose();
       if (leftContainerRef.current && leftContainerRef.current.contains(left.renderer.domElement)) {
         leftContainerRef.current.removeChild(left.renderer.domElement);
@@ -188,7 +518,7 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
       leftParticleRef.current?.dispose();
       rightParticleRef.current?.dispose();
     };
-  }, [splitMode, setupScene, showParticles]);
+  }, [splitMode, setupScene, showParticles, annotationMode, profileMode, profileStep, onSceneClickForAnnotation, onSetAnnotationMode, onProfilePointsSelected, onSetProfileMode, onCursorMove]);
 
   const updateSceneObjects = useCallback((
     fieldsData: WindFields | null,
@@ -197,7 +527,7 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
     gridGroupRef: React.MutableRefObject<THREE.Group | null>,
     particleTracerRef: React.MutableRefObject<ParticleTracer | null>,
     particleMeshRef: React.MutableRefObject<THREE.Points | null>,
-    label: string,
+    _label: string,
   ) => {
     if (!fieldsData || !scene) return;
 
@@ -221,6 +551,7 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
 
     if (!gridGroupRef.current) {
       const grid = createGridBox(fieldsData.dims);
+      grid.position.set(0, -90, 0);
       scene.add(grid);
       gridGroupRef.current = grid;
     }
@@ -234,8 +565,9 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
 
       const tracer = new ParticleTracer({ numParticles, speedScale: particleSpeed });
       tracer.setFields(fieldsData);
+      tracer.setParticleSize(particleSize);
       const mesh = tracer.createMesh();
-      mesh.position.set(0, 0, 0);
+      mesh.position.set(0, -90, 0);
       scene.add(mesh);
       particleTracerRef.current = tracer;
       particleMeshRef.current = mesh;
@@ -247,7 +579,7 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
       particleTracerRef.current?.dispose();
       particleTracerRef.current = null;
     }
-  }, [numLines, tubeRadius, numParticles, particleSpeed, showStreamlines, showParticles]);
+  }, [numLines, tubeRadius, numParticles, particleSpeed, particleSize, showStreamlines, showParticles]);
 
   useEffect(() => {
     updateSceneObjects(
@@ -266,6 +598,17 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
       );
     }
   }, [referenceFields, splitMode, updateSceneObjects]);
+
+  useEffect(() => {
+    if (leftParticleRef.current) {
+      leftParticleRef.current.setParticleSize(particleSize);
+      leftParticleRef.current.setSpeedScale(particleSpeed);
+    }
+    if (rightParticleRef.current) {
+      rightParticleRef.current.setParticleSize(particleSize);
+      rightParticleRef.current.setSpeedScale(particleSpeed);
+    }
+  }, [particleSize, particleSpeed]);
 
   const handleRecordToggle = useCallback(() => {
     if (!recorderRef.current) return;
@@ -287,6 +630,25 @@ export const WindScene3D = forwardRef<WindScene3DHandle, Props>(({
           <div className="scene-label label-wasm">
             {splitMode ? 'WASM / JS 回退' : ''}
           </div>
+          {(annotationMode || profileMode) && (
+            <div className="mode-indicator">
+              {annotationMode && <span className="mode-tag ann-tag">📌 点击放置标注</span>}
+              {profileMode && (
+                <span className="mode-tag profile-tag">
+                  📊 {profileStep === 0 ? '选择起点' : '选择终点'}
+                </span>
+              )}
+              <button
+                className="mode-cancel"
+                onClick={() => {
+                  onSetAnnotationMode(false);
+                  onSetProfileMode(false);
+                }}
+              >
+                取消
+              </button>
+            </div>
+          )}
           {loading && (
             <div className="loading-overlay">
               <div className="loading-spinner" />
