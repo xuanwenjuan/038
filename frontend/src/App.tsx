@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { WasmLoader } from './wasm/WasmLoader';
 import { IndexedDBCache, defaultPresets } from './db/IndexedDBCache';
 import { ControlPanel } from './components/ControlPanel';
-import { WindScene3D } from './components/WindScene3D';
+import { WindScene3D, WindScene3DHandle } from './components/WindScene3D';
 import { ModelParams, WindFields, PresetEntry } from './types';
+import { computeRMSE, fetchBackendFields, RMSEStats } from './vis/RMSECalculator';
 import './App.css';
 
 const DEFAULT_PARAMS: ModelParams = {
@@ -15,19 +16,25 @@ const DEFAULT_PARAMS: ModelParams = {
 export default function App() {
   const [params, setParams] = useState<ModelParams>(DEFAULT_PARAMS);
   const [fields, setFields] = useState<WindFields | null>(null);
+  const [referenceFields, setReferenceFields] = useState<WindFields | null>(null);
   const [loading, setLoading] = useState(false);
   const [computeTimeMs, setComputeTimeMs] = useState(0);
   const [useWasm, setUseWasm] = useState(true);
   const [presets, setPresets] = useState<PresetEntry[]>([]);
+  const [splitMode, setSplitMode] = useState(false);
+  const [showParticles, setShowParticles] = useState(true);
+  const [showStreamlines, setShowStreamlines] = useState(true);
+  const [rmseStats, setRmseStats] = useState<RMSEStats | null>(null);
 
   const wasmLoaderRef = useRef<WasmLoader | null>(null);
   const dbCacheRef = useRef<IndexedDBCache | null>(null);
+  const sceneRef = useRef<WindScene3DHandle>(null);
   const initializedRef = useRef(false);
 
   useEffect(() => {
     const init = async () => {
       const loader = new WasmLoader();
-      const wasmOk = await loader.load();
+      await loader.load();
       setUseWasm(loader.isWasm());
       wasmLoaderRef.current = loader;
 
@@ -80,8 +87,29 @@ export default function App() {
       setFields(result);
       setComputeTimeMs(t1 - t0);
       setLoading(false);
+
+      if (splitMode) {
+        fetchBackendFields(params).then(ref => {
+          setReferenceFields(ref);
+          if (ref && result) {
+            setRmseStats(computeRMSE(result, ref));
+          }
+        });
+      }
     });
-  }, [params]);
+  }, [params, splitMode]);
+
+  const handleToggleSplit = useCallback(async () => {
+    const next = !splitMode;
+    setSplitMode(next);
+    if (next && fields) {
+      const ref = await fetchBackendFields(params);
+      setReferenceFields(ref);
+      if (ref) {
+        setRmseStats(computeRMSE(fields, ref));
+      }
+    }
+  }, [splitMode, fields, params]);
 
   const handleSavePreset = useCallback(async (name: string) => {
     if (!dbCacheRef.current) return;
@@ -138,16 +166,31 @@ export default function App() {
             loading={loading}
             computeTimeMs={computeTimeMs}
             useWasm={useWasm}
+            splitMode={splitMode}
+            onToggleSplit={handleToggleSplit}
+            showParticles={showParticles}
+            onToggleParticles={() => setShowParticles(p => !p)}
+            showStreamlines={showStreamlines}
+            onToggleStreamlines={() => setShowStreamlines(p => !p)}
           />
         </aside>
 
         <main className="main-content">
-          <WindScene3D fields={fields} loading={loading} />
+          <WindScene3D
+            ref={sceneRef}
+            fields={fields}
+            referenceFields={referenceFields}
+            loading={loading}
+            rmseStats={rmseStats}
+            splitMode={splitMode}
+            showParticles={showParticles}
+            showStreamlines={showStreamlines}
+          />
         </main>
       </div>
 
       <footer className="app-footer">
-        <span>Fortran 77 重力波参数化模型 → Emscripten/WASM → Three.js 3D 流线可视化</span>
+        <span>Fortran 77 → Emscripten/WASM → Three.js 3D 流线 · GPU 粒子示踪 · 分屏对比 · WebM 导出</span>
       </footer>
     </div>
   );

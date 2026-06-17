@@ -12,12 +12,21 @@ interface Props {
   loading: boolean;
   computeTimeMs: number;
   useWasm: boolean;
+  splitMode: boolean;
+  onToggleSplit: () => void;
+  showParticles: boolean;
+  onToggleParticles: () => void;
+  showStreamlines: boolean;
+  onToggleStreamlines: () => void;
 }
 
 export const ControlPanel: React.FC<Props> = ({
   params, onChange, onCompute,
   onSavePreset, presets, onLoadPreset, onDeletePreset,
   loading, computeTimeMs, useWasm,
+  splitMode, onToggleSplit,
+  showParticles, onToggleParticles,
+  showStreamlines, onToggleStreamlines,
 }) => {
   const [presetName, setPresetName] = React.useState('');
 
@@ -102,6 +111,40 @@ export const ControlPanel: React.FC<Props> = ({
       </div>
 
       <div className="param-group">
+        <h3>可视化模式</h3>
+
+        <div className="toggle-row">
+          <button
+            className={`toggle-btn ${showStreamlines ? 'active' : ''}`}
+            onClick={onToggleStreamlines}
+          >
+            {showStreamlines ? '✓' : '○'} 流线管道
+          </button>
+          <button
+            className={`toggle-btn ${showParticles ? 'active' : ''}`}
+            onClick={onToggleParticles}
+          >
+            {showParticles ? '✓' : '○'} GPU 粒子示踪
+          </button>
+        </div>
+
+        <button
+          className={`toggle-btn split-btn ${splitMode ? 'active' : ''}`}
+          onClick={onToggleSplit}
+        >
+          {splitMode ? '✓' : '○'} 分屏双模对比
+        </button>
+
+        {splitMode && (
+          <div className="split-hint">
+            左: WASM/JS 计算 | 右: 基准 API
+            <br />
+            角落显示 RMSE 误差
+          </div>
+        )}
+      </div>
+
+      <div className="param-group">
         <h3>预设管理</h3>
         <div className="preset-input">
           <input
@@ -157,6 +200,9 @@ export const ControlPanel: React.FC<Props> = ({
         </div>
         <div className="info-row">
           <span>总网格点:</span><span>20,480</span>
+        </div>
+        <div className="info-row">
+          <span>数据大小:</span><span>491 KB</span>
         </div>
       </div>
     </div>
