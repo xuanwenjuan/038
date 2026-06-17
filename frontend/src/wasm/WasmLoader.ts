@@ -27,6 +27,7 @@ export class WasmLoader {
   private module: WasmModule | null = null;
   private dims: GridDimensions | null = null;
   private useFallback = false;
+  private prevPtr: number = 0;
 
   async load(): Promise<boolean> {
     try {
@@ -49,6 +50,7 @@ export class WasmLoader {
       const factory = factoryFn as WasmModuleFactory;
       this.module = await factory({
         locateFile: (file: string) => `/wasm/${file}`,
+        TOTAL_MEMORY: 256 * 1024 * 1024,
       });
       const ret = this.module._wasm_init();
       if (ret !== 0) {
@@ -98,6 +100,21 @@ export class WasmLoader {
       return this.computeFallback(params);
     }
     if (!this.module) throw new Error('WASM not loaded');
+
+    if (this.prevPtr !== 0) {
+      try {
+        this.module._free(this.prevPtr);
+      } catch (e) {
+        console.warn('释放前次 WASM 内存失败:', e);
+      }
+      this.prevPtr = 0;
+    }
+
+    try {
+      this.module._wasm_free();
+    } catch (e) {
+      console.warn('调用 _wasm_free 失败:', e);
+    }
 
     const ret = this.module._wasm_compute(
       params.windShear, params.buoyFreq, params.coriolis

@@ -63,43 +63,62 @@ export function computeRMSE(a: WindFields, b: WindFields): RMSEStats {
   };
 }
 
-export async function fetchBackendFields(
+let _requestCounter = 0;
+
+export interface BackendFetchResult {
+  requestId: number;
+  paramsSig: string;
+  promise: Promise<{ fields: WindFields | null; requestId: number; paramsSig: string }>;
+}
+
+export function fetchBackendFields(
   params: ModelParams,
   apiUrl: string = 'http://localhost:8000'
-): Promise<WindFields | null> {
-  try {
-    const resp = await fetch(`${apiUrl}/api/compute`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        nlon: 32,
-        nlat: 32,
-        nlev: 20,
-        wind_shear: params.windShear,
-        buoy_freq: params.buoyFreq,
-        coriolis: params.coriolis,
-        use_fortran: false,
-        format: 'json',
-      }),
-    });
+): BackendFetchResult {
+  const requestId = ++_requestCounter;
+  const paramsSig = `${params.windShear.toFixed(8)}_${params.buoyFreq.toFixed(8)}_${params.coriolis.toExponential(4)}`;
 
-    if (!resp.ok) {
-      console.warn('后端 API 请求失败:', resp.status);
-      return null;
+  const promise = (async () => {
+    try {
+      const resp = await fetch(`${apiUrl}/api/compute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nlon: 32,
+          nlat: 32,
+          nlev: 20,
+          wind_shear: params.windShear,
+          buoy_freq: params.buoyFreq,
+          coriolis: params.coriolis,
+          use_fortran: false,
+          format: 'json',
+        }),
+      });
+
+      if (!resp.ok) {
+        console.warn('后端 API 请求失败:', resp.status);
+        return { fields: null, requestId, paramsSig };
+      }
+
+      const data = await resp.json();
+      const gridSize = 32 * 32 * 20;
+      const dims = { nlon: 32, nlat: 32, nlev: 20, gridSize, fieldBytes: gridSize * 8, totalBytes: gridSize * 8 * 3 };
+
+      return {
+        fields: {
+          u: new Float64Array(data.u),
+          v: new Float64Array(data.v),
+          w: new Float64Array(data.w),
+          dims,
+        },
+        requestId,
+        paramsSig,
+      };
+    } catch (e) {
+      console.warn('后端 API 不可用:', e);
+      return { fields: null, requestId, paramsSig };
     }
+  })();
 
-    const data = await resp.json();
-    const gridSize = 32 * 32 * 20;
-    const dims = { nlon: 32, nlat: 32, nlev: 20, gridSize, fieldBytes: gridSize * 8, totalBytes: gridSize * 8 * 3 };
-
-    return {
-      u: new Float64Array(data.u),
-      v: new Float64Array(data.v),
-      w: new Float64Array(data.w),
-      dims,
-    };
-  } catch (e) {
-    console.warn('后端 API 不可用:', e);
-    return null;
-  }
+  return { requestId, paramsSig, promise };
 }

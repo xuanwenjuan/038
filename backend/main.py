@@ -8,6 +8,7 @@ import io
 import struct
 import uuid
 import json
+import threading
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -29,6 +30,14 @@ except ImportError:
     HAS_SOCKETIO = False
 
 from gravity_wave_model import gravity_wave_param
+
+
+fortran_lock = threading.Lock()
+
+
+def safe_gravity_wave_param(**kwargs):
+    with fortran_lock:
+        return gravity_wave_param(**kwargs)
 
 
 app = FastAPI(
@@ -276,7 +285,7 @@ async def health():
 @app.post("/api/compute")
 async def compute(req: ComputeRequest):
     t0 = time.time()
-    result = gravity_wave_param(
+    result = safe_gravity_wave_param(
         nlon=req.nlon,
         nlat=req.nlat,
         nlev=req.nlev,
@@ -360,7 +369,7 @@ async def validate(request: dict):
         w_wasm = np.frombuffer(wasm_bytes[field_bytes*2:], dtype=np.float64).reshape(nlon, nlat, nlev)
 
         t0 = time.time()
-        ref = gravity_wave_param(
+        ref = safe_gravity_wave_param(
             nlon=nlon, nlat=nlat, nlev=nlev,
             wind_shear=params.get('wind_shear', 0.008),
             buoy_freq=params.get('buoy_freq', 0.02),
@@ -412,7 +421,7 @@ async def extract_profile(req: ProfileRequest):
     返回各高度层上 u/v/w 分量的插值结果
     """
     t0 = time.time()
-    result = gravity_wave_param(
+    result = safe_gravity_wave_param(
         nlon=req.nlon, nlat=req.nlat, nlev=req.nlev,
         wind_shear=req.wind_shear,
         buoy_freq=req.buoy_freq,

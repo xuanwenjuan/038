@@ -11,7 +11,7 @@ EMCFLAGS = -O2 -Wall -s WASM=1 -s EXPORTED_RUNTIME_METHODS='["ccall", "cwrap", "
 EMCFLAGS += -s EXPORTED_FUNCTIONS='["_main", "_wasm_init", "_wasm_free", "_wasm_compute", "_wasm_get_u8_ptr", "_wasm_serialize_fields", "_wasm_get_grid_size", "_wasm_get_field_bytes", "_wasm_get_total_bytes", "_wasm_get_nlon", "_wasm_get_nlat", "_wasm_get_nlev", "_wasm_validate", "malloc", "free"]'
 EMCFLAGS += -s ALLOW_MEMORY_GROWTH=1
 EMCFLAGS += -s MODULARIZE=1 -s EXPORT_ES6=1
-EMCFLAGS += -s MAXIMUM_MEMORY=512MB
+EMCFLAGS += -s MAXIMUM_MEMORY=256MB
 EMCFLAGS += -s INITIAL_MEMORY=64MB
 
 FORTRAN_OBJS = $(BUILD_DIR)/gravity_wave_model.o

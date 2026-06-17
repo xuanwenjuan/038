@@ -8,7 +8,7 @@ import { CollaborationService } from './collaboration/CollaborationService';
 import { createAnnotation } from './collaboration/annotationApi';
 import { extractProfile } from './collaboration/profileApi';
 import { ModelParams, WindFields, PresetEntry, Annotation, RoomMember, ProfileData } from './types';
-import { computeRMSE, fetchBackendFields, RMSEStats } from './vis/RMSECalculator';
+import { computeRMSE, fetchBackendFields, RMSEStats, BackendFetchResult } from './vis/RMSECalculator';
 import './App.css';
 
 const DEFAULT_PARAMS: ModelParams = {
@@ -53,6 +53,7 @@ export default function App() {
   const sceneRef = useRef<WindScene3DHandle>(null);
   const initializedRef = useRef(false);
   const lastCursorSentRef = useRef<number>(0);
+  const latestBackendRequestIdRef = useRef<number>(0);
 
   const handleParamChange = useCallback((newParams: ModelParams) => {
     setParams(newParams);
@@ -237,7 +238,19 @@ export default function App() {
       setLoading(false);
 
       if (splitMode) {
-        fetchBackendFields(params).then(ref => {
+        const expectedSig = `${params.windShear.toFixed(8)}_${params.buoyFreq.toFixed(8)}_${params.coriolis.toExponential(4)}`;
+        const req: BackendFetchResult = fetchBackendFields(params);
+        latestBackendRequestIdRef.current = req.requestId;
+
+        req.promise.then(({ fields: ref, requestId, paramsSig }) => {
+          if (requestId !== latestBackendRequestIdRef.current) {
+            console.log(`[RMSE] 忽略过期响应 #${requestId}, 当前最新 #${latestBackendRequestIdRef.current}`);
+            return;
+          }
+          if (paramsSig !== expectedSig) {
+            console.warn(`[RMSE] 参数签名不匹配, 忽略响应 #${requestId}`);
+            return;
+          }
           setReferenceFields(ref);
           if (ref && result) {
             setRmseStats(computeRMSE(result, ref));
@@ -251,7 +264,19 @@ export default function App() {
     const next = !splitMode;
     setSplitMode(next);
     if (next && fields) {
-      const ref = await fetchBackendFields(params);
+      const expectedSig = `${params.windShear.toFixed(8)}_${params.buoyFreq.toFixed(8)}_${params.coriolis.toExponential(4)}`;
+      const req: BackendFetchResult = fetchBackendFields(params);
+      latestBackendRequestIdRef.current = req.requestId;
+
+      const { fields: ref, requestId, paramsSig } = await req.promise;
+      if (requestId !== latestBackendRequestIdRef.current) {
+        console.log(`[RMSE] 忽略过期响应 #${requestId}, 当前最新 #${latestBackendRequestIdRef.current}`);
+        return;
+      }
+      if (paramsSig !== expectedSig) {
+        console.warn(`[RMSE] 参数签名不匹配, 忽略响应 #${requestId}`);
+        return;
+      }
       setReferenceFields(ref);
       if (ref) {
         setRmseStats(computeRMSE(fields, ref));
